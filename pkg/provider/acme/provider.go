@@ -39,6 +39,7 @@ type Configuration struct {
 	Storage        string `description:"Storage to use." json:"storage,omitempty" toml:"storage,omitempty" yaml:"storage,omitempty" export:"true"`
 	KeyType        string `description:"KeyType used for generating certificate private key. Allow value 'EC256', 'EC384', 'RSA2048', 'RSA4096', 'RSA8192'." json:"keyType,omitempty" toml:"keyType,omitempty" yaml:"keyType,omitempty" export:"true"`
 	EAB            *EAB   `description:"External Account Binding to use." json:"eab,omitempty" toml:"eab,omitempty" yaml:"eab,omitempty"`
+	RenewalHour    int    `description:"Schedule hour for auto renewal 0-23." json:"renewalHour,omitempty" toml:"renewalHour,omitempty" yaml:"renewalHour,omitempty"`
 
 	DNSChallenge  *DNSChallenge  `description:"Activate DNS-01 Challenge." json:"dnsChallenge,omitempty" toml:"dnsChallenge,omitempty" yaml:"dnsChallenge,omitempty" label:"allowEmpty" file:"allowEmpty" export:"true"`
 	HTTPChallenge *HTTPChallenge `description:"Activate HTTP-01 Challenge." json:"httpChallenge,omitempty" toml:"httpChallenge,omitempty" yaml:"httpChallenge,omitempty" label:"allowEmpty" file:"allowEmpty" export:"true"`
@@ -50,6 +51,7 @@ func (a *Configuration) SetDefaults() {
 	a.CAServer = lego.LEDirectoryProduction
 	a.Storage = "acme.json"
 	a.KeyType = "RSA4096"
+	a.RenewalHour = -1
 }
 
 // CertAndStore allows mapping a TLS certificate to a TLS store.
@@ -189,7 +191,12 @@ func (p *Provider) Provide(configurationChan chan<- dynamic.Message, pool *safe.
 
 	p.renewCertificates(ctx)
 
-	ticker := time.NewTicker(24 * time.Hour)
+	addHours := 24
+	if p.RenewalHour >= 0 {
+		addHours = p.RenewalHour - time.Now().Hour() + 24
+	}
+
+	ticker := time.NewTicker(time.Duration(addHours) * time.Hour)
 	pool.GoCtx(func(ctxPool context.Context) {
 		for {
 			select {
@@ -645,6 +652,13 @@ func (p *Provider) renewCertificates(ctx context.Context) {
 		// If there's an error, we assume the cert is broken, and needs update
 		// <= 30 days left, renew certificate
 		if err != nil || crt == nil || crt.NotAfter.Before(time.Now().Add(24*30*time.Hour)) {
+
+			// RenewalHour != Now && certificate.expire > 1 day left, skip renewal
+			if p.RenewalHour >= 0 && p.RenewalHour != time.Now().Hour() && err == nil && crt != nil && crt.NotAfter.After(time.Now().Add(24*time.Hour)) {
+				logger.Infof("Skip renewing certificate %+v because now is not renewal hour %v", cert.Domain, p.RenewalHour)
+				continue
+			}
+
 			client, err := p.getClient()
 			if err != nil {
 				logger.Infof("Error renewing certificate from LE : %+v, %v", cert.Domain, err)
